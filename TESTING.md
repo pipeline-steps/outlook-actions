@@ -49,6 +49,18 @@ Read the 10 most recent emails:
 ./run.sh -m recent
 ```
 
+#### Test Mode: Flag First
+Read recent emails and flag the first (most recent) one:
+
+```bash
+./run.sh -m flag-first
+```
+
+This mode demonstrates:
+- Reading emails to get IDs
+- Using the state action to flag an email
+- Combining multiple actions in one run
+
 #### Test Mode: Action
 Process custom actions from an input file:
 
