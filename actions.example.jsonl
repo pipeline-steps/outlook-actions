@@ -2,3 +2,4 @@
 {"action":"read","folder":"inbox","filter":"isRead eq false","top":10}
 {"action":"state","mail":"<EMAIL_ID_HERE>","flagged":true}
 {"action":"state","mail":"<EMAIL_ID_HERE>","isRead":true}
+{"action":"move","mail":"<EMAIL_ID_HERE>","folder":"archive"}

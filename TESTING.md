@@ -61,6 +61,22 @@ This mode demonstrates:
 - Using the state action to flag an email
 - Combining multiple actions in one run
 
+**Note**: Requires `Mail.ReadWrite` permission in Azure AD.
+
+#### Test Mode: Move First
+Read recent emails and move the first (most recent) one to the Archive folder:
+
+```bash
+./run.sh -m move-first
+```
+
+This mode demonstrates:
+- Reading emails to get IDs
+- Using the move action to move an email to a different folder
+- Automated email organization
+
+**Note**: Requires `Mail.ReadWrite` permission in Azure AD.
+
 #### Test Mode: Action
 Process custom actions from an input file:
 
