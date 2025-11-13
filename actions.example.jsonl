@@ -1,0 +1,2 @@
+{"action":"read","folder":"inbox","top":5}
+{"action":"read","folder":"inbox","filter":"isRead eq false","top":10}
