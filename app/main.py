@@ -347,7 +347,7 @@ def main(step: StepArgs):
     user_id = step.config.userId
 
     # Check if input file is provided
-    if step.input:
+    if step.input.path:
         # Process actions from input file
         actions = step.input.readJsons()
         print(f"Processing {len(actions)} actions from input file...")
