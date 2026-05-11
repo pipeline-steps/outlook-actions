@@ -1,35 +1,98 @@
 import sys
 import json
+import os
 from datetime import datetime, timezone
-from msal import ConfidentialClientApplication
+from msal import PublicClientApplication, SerializableTokenCache
 import requests
 from steputil import StepArgs, StepArgsBuilder
 
 
-def get_access_token(tenant_id, client_id, client_secret, scopes):
+def get_access_token_delegated(tenant_id, client_id, scopes, token_cache_file=".token_cache.json"):
     """
-    Authenticate using client credentials flow (app-only authentication).
+    Authenticate using device code flow (delegated authentication).
+    User signs in once, then tokens are cached for future use.
+
+    The token cache stores only refresh tokens and account information,
+    not access tokens. Access tokens are acquired on-demand using the
+    cached refresh token.
 
     Args:
         tenant_id: Azure AD tenant ID
         client_id: Application (client) ID
-        client_secret: Client secret value
         scopes: List of OAuth scopes
+        token_cache_file: Path to store cached tokens (refresh tokens only)
 
     Returns:
         Access token string
     """
     try:
         authority = f"https://login.microsoftonline.com/{tenant_id}"
-        app = ConfidentialClientApplication(
+
+        # Create a custom token cache that excludes access tokens
+        class RefreshTokenOnlyCache(SerializableTokenCache):
+            def add(self, event, **kwargs):
+                """Override to exclude access tokens from cache."""
+                super().add(event, **kwargs)
+                # After adding, remove any access tokens
+                self._remove_access_tokens()
+
+            def _remove_access_tokens(self):
+                """Remove access tokens from cache, keeping only refresh tokens and accounts."""
+                cache_data = json.loads(self.serialize()) if self.serialize() else {}
+                if "AccessToken" in cache_data:
+                    del cache_data["AccessToken"]
+                    # Deserialize the modified cache back
+                    super().deserialize(json.dumps(cache_data))
+
+        # Create or load token cache
+        cache = RefreshTokenOnlyCache()
+        if os.path.exists(token_cache_file):
+            with open(token_cache_file, 'r') as f:
+                cache.deserialize(f.read())
+
+        # Create public client application with token cache
+        app = PublicClientApplication(
             client_id,
             authority=authority,
-            client_credential=client_secret
+            token_cache=cache
         )
 
-        result = app.acquire_token_for_client(scopes=scopes)
+        # Try to get token from cache first
+        accounts = app.get_accounts()
+        if accounts:
+            print("Using cached credentials...")
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+            if result and "access_token" in result:
+                # Save cache (will exclude access tokens via our custom cache)
+                if cache.has_state_changed:
+                    with open(token_cache_file, 'w') as f:
+                        f.write(cache.serialize())
+                return result["access_token"]
+
+        # If no cached token, use device code flow (interactive)
+        print("\nNo cached token found. Starting interactive sign-in...\n")
+        flow = app.initiate_device_flow(scopes=scopes)
+
+        if "user_code" not in flow:
+            raise ValueError(f"Failed to create device flow: {flow.get('error_description', 'Unknown error')}")
+
+        # Display instructions to user
+        print("=" * 60)
+        print(flow["message"])
+        print("=" * 60)
+        print("\nWaiting for you to complete sign-in in your browser...")
+
+        # Wait for user to authenticate
+        result = app.acquire_token_by_device_flow(flow)
 
         if "access_token" in result:
+            # Save token cache to file (access tokens will be excluded)
+            # Force save on initial authentication since custom cache operations
+            # may reset the has_state_changed flag
+            with open(token_cache_file, 'w') as f:
+                f.write(cache.serialize())
+
+            print(f"\nAuthentication successful! Token cached to {token_cache_file}")
             return result["access_token"]
         else:
             error_msg = result.get("error_description", result.get("error", "Unknown error"))
@@ -47,7 +110,7 @@ def fetch_emails(access_token, user_id, folder, top=100, filter_query=None):
 
     Args:
         access_token: OAuth access token
-        user_id: User's email address or ID
+        user_id: User's email address or ID (not used with delegated auth, uses /me/)
         folder: Folder to read from (e.g., 'inbox', 'sentitems', 'drafts')
         top: Maximum number of emails to retrieve
         filter_query: Optional OData filter query
@@ -55,13 +118,12 @@ def fetch_emails(access_token, user_id, folder, top=100, filter_query=None):
     Returns:
         List of email messages
     """
-    # Build the API URL - use messages endpoint directly instead of going through mailFolders
-    # This works better with app-only permissions
+    # With delegated permissions, use /me/ endpoint (automatically the signed-in user)
     if folder and folder.lower() != 'inbox':
-        base_url = f"https://graph.microsoft.com/v1.0/users/{user_id}/mailFolders/{folder}/messages"
+        base_url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
     else:
-        # Use direct messages endpoint for inbox (more compatible with app permissions)
-        base_url = f"https://graph.microsoft.com/v1.0/users/{user_id}/messages"
+        # Use direct messages endpoint for inbox
+        base_url = f"https://graph.microsoft.com/v1.0/me/messages"
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -122,14 +184,14 @@ def move_email(access_token, user_id, message_id, target_folder):
 
     Args:
         access_token: OAuth access token
-        user_id: User's email address or ID
+        user_id: User's email address or ID (not used with delegated auth)
         message_id: ID of the message to move
         target_folder: Target folder name or ID
 
     Returns:
         Result dictionary with success status
     """
-    url = f"https://graph.microsoft.com/v1.0/users/{user_id}/messages/{message_id}/move"
+    url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}/move"
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -167,7 +229,7 @@ def update_email_state(access_token, user_id, message_id, flagged=None, is_read=
 
     Args:
         access_token: OAuth access token
-        user_id: User's email address or ID
+        user_id: User's email address or ID (not used with delegated auth)
         message_id: ID of the message to update
         flagged: Set flag status (True/False) or None to leave unchanged
         is_read: Set read status (True/False) or None to leave unchanged
@@ -175,7 +237,7 @@ def update_email_state(access_token, user_id, message_id, flagged=None, is_read=
     Returns:
         Result dictionary with success status
     """
-    url = f"https://graph.microsoft.com/v1.0/users/{user_id}/messages/{message_id}"
+    url = f"https://graph.microsoft.com/v1.0/me/messages/{message_id}"
 
     headers = {
         'Authorization': f'Bearer {access_token}',
@@ -338,13 +400,20 @@ def main(step: StepArgs):
     print("Authenticating with Microsoft Graph API...")
     tenant_id = step.config.tenantId
     client_id = step.config.clientId
-    client_secret = step.config.clientSecret
-    scopes = step.config.scopes if step.config.scopes else ["https://graph.microsoft.com/.default"]
+    # Use delegated permissions with specific scopes
+    # Note: offline_access is added automatically by MSAL, don't include it
+    scopes = step.config.scopes if step.config.scopes else [
+        "Mail.Read",
+        "Mail.ReadWrite",
+        "Mail.Send"
+    ]
 
-    access_token = get_access_token(tenant_id, client_id, client_secret, scopes)
+    access_token = get_access_token_delegated(tenant_id, client_id, scopes)
     print("Authentication successful")
 
-    user_id = step.config.userId
+    # With delegated auth, user_id is not required (uses signed-in user)
+    # Keep for backward compatibility but it's not used
+    user_id = step.config.userId if step.config.userId else "me"
 
     # Check if input file is provided
     if step.input.path:
@@ -397,12 +466,7 @@ def validate_config(config):
     if not config.clientId:
         print("Parameter `clientId` is required", file=sys.stderr)
         return False
-    if not config.clientSecret:
-        print("Parameter `clientSecret` is required", file=sys.stderr)
-        return False
-    if not config.userId:
-        print("Parameter `userId` is required", file=sys.stderr)
-        return False
+    # clientSecret and userId are no longer required for delegated auth
     return True
 
 
@@ -412,8 +476,8 @@ if __name__ == "__main__":
          .output()
          .config("tenantId")
          .config("clientId")
-         .config("clientSecret")
-         .config("userId")
+         .config("clientSecret", optional=True)
+         .config("userId", optional=True)
          .config("folder", optional=True)
          .config("top", optional=True)
          .config("filter", optional=True)
